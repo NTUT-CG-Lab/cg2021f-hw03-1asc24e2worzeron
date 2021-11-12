@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<title>three.js webgl - loaders - MMD loader</title>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+	<link type="text/css" rel="stylesheet" href="main.css">
+	<style>
+		body {
+			background-color: #fff;
+			color: #444;
+		}
+		a {
+			color: #08f;
+		}
+		#eyeMenu { 
+			position: absolute;
+			top: 10px;
+			left: 10px;
+		}
+	</style>
+</head>
+
+<body>
+	<div id="info"></div>
+
+	<script src="js/libs/ammo.wasm.js"></script>
+	<script src="scoreoutputer.min.js"></script>
+	<script>
+		// 建構子 ScoreOutputer 接受一個字串，該字串為 csv 的檔案名稱
+		var so = new ScoreOutputer("109598051");
+		
+		// 安裝 bootstrap 的 css，如果在 html 上方引用 bootstrap 5.1.1 的話就不用使用 installCSS，注意一定要 bootstrap css 5.1.1 版
+		// installCSS 接收一個 callback 當作參數，作為成功安裝 bootstrap css 的回呼函式
+		so.installCSS(function(){
+		
+			//加入項目(string)，分數(int)，完成狀況(boolean)
+			//有幾個項目就呼叫幾個 addChild
+			//addChild 要比 renderModal 先呼叫
+			so.addChild("繪製出 5 個畫面", 1, true);
+			so.addChild("回答問題", 1, true);
+			so.addChild("可按鍵選擇上 / 下一隻角色", 1, true);
+			so.addChild("讀取作業 2 儲存的座標點在眼睛上繪製出分割線", 1, true);
+			so.addChild("可選擇當下控制哪個虹膜", 1, true);
+			so.addChild("按滑鼠左鍵控制虹膜移動，右鍵停止", 2, false);
+			so.addChild("複製參數至對應目標參數", 2, false);
+			so.addChild("可儲存虹膜轉動角度", 1, false);
+
+			//產生自評表，參數如下所示
+			so.renderModal(
+				document.body, //1. 自評表插入位置 (預設 document.body)
+				'rgba(100,45,58,1)', //2. 自評表背景 (預設紅色)
+				'white', //3. 自評表文字顏色 (預設白色)
+				'15pt', //4. 自評表文字大小 (預設 14pt)
+				'15px',//5. 自評表 checkbox 文字大小 (預設多少忘了)
+				dialogTitle='自我評分表' //6. 自評表標題 (預設 "自我評分表")
+			);
+			
+			//設定下載按鈕 <-- 一定要呼叫這個函數，不然沒有下載功能
+			so.installDownloadBtn();
+			
+			//產生 "開啟自評表按鈕"
+			so.renderBtn(
+				document.getElementById("info"), //自評表按鈕插入位置
+				"開啟自評表" //自評表按鈕文字
+			);
+		});
+	</script>
+	<script type="module">
+
+		import * as THREE from './build/three.module.js';
+		import { GUI } from './jsm/libs/dat.gui.module.js';
+		import { OrbitControls } from './jsm/controls/OrbitControls.js';
+		import { OutlineEffect } from './jsm/effects/OutlineEffect.js';
+		import { MMDLoader } from './jsm/loaders/MMDLoader.js';
+		import { MMDAnimationHelper } from './jsm/animation/MMDAnimationHelper.js';
+		import * as SkeletonUtils from './jsm/utils/SkeletonUtils.js';
+
+		let scene, renderer, effect;
+		let mesh, helper;
+		let SCREEN_WIDTH = window.innerWidth;
+		let SCREEN_HEIGHT = window.innerHeight;
+		let aspect = SCREEN_WIDTH / SCREEN_HEIGHT;
+		let frustumSize = 30;
+		let camera, camera2, camera3, camera4, camera5;
+
+		// 追加參數...
+		
+		let rightViews;
+		
+		//模型
+		let modelPaths = [
+			'『天宮こころ(Kokoro Amamiya)』/『天宮こころ(Kokoro Amamiya)』.pmx',
+			'kizunaai/kizunaai.pmx'
+			//物述有栖會弄爆我的瀏覽器，所以不放上來
+		], modelIndex = 1;
+		
+		//畫線
+		let lineData = {
+			'1': { 'ref': new THREE.Line(), 'points': new THREE.Vector3(), 'direction': '下', 'drawn': false },
+			'2': { 'ref': new THREE.Line(), 'points': new THREE.Vector3(), 'direction': '左', 'drawn': false },
+			'3': { 'ref': new THREE.Line(), 'points': new THREE.Vector3(), 'direction': '上', 'drawn': false },
+			'4': { 'ref': new THREE.Line(), 'points': new THREE.Vector3(), 'direction': '右', 'drawn': false }
+		};
+		let leftGroup, rightGroup;
+		let eyeMenu, eyeParams;
+		
+		//控制
+		let pressedKey = '', currentScene, currentEye;
+		let selectedEye = 0, eyeState = {
+			0: { 'side': 'leftGroup',	'view': 'upperLeft',	'look': 'down' },
+			1: { 'side': 'rightGroup',	'view': 'upperLeft',	'look': 'down' },
+			2: { 'side': 'leftGroup',	'view': 'upperRight',	'look': 'up' },
+			3: { 'side': 'rightGroup',	'view': 'upperRight',	'look': 'up' },
+			4: { 'side': 'leftGroup',	'view': 'lowerLeft',	'look': 'left' },
+			5: { 'side': 'rightGroup',	'view': 'lowerLeft',	'look': 'left' },
+			6: { 'side': 'leftGroup',	'view': 'lowerRight',	'look': 'right' },
+			7: { 'side': 'rightGroup',	'view': 'lowerRight',	'look': 'right' }
+		};
+		
+		// ...追加參數
+
+		Ammo().then(function (AmmoLib) {
+
+			Ammo = AmmoLib;
+
+			init();
+			animate();
+
+		});
+
+		function init() {
+
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+			
+			let ratio = 4.5;
+			
+			camera = new THREE.OrthographicCamera(0.5 * frustumSize * aspect / - 2 / ratio, 0.5 * frustumSize * aspect / 2 / ratio, frustumSize / 2 / ratio, frustumSize / - 2 / ratio, 0.1, 1000);
+			
+			camera.position.z = 30;
+
+			// scene
+
+			scene = new THREE.Scene();
+			const ambient = new THREE.AmbientLight(0x666666);
+			scene.add(ambient);
+
+			const directionalLight = new THREE.DirectionalLight(0x887766);
+			directionalLight.position.set(- 1, 1, 1).normalize();
+			scene.add(directionalLight);
+			
+			leftGroup = new THREE.Group();
+			scene.add(leftGroup);
+			
+			rightGroup = new THREE.Group();
+			scene.add(rightGroup);
+			
+			//其他 viewport 的 camera, scene 初始化
+			
+			rightViews = {
+				'upperLeft': {
+					'camera': new THREE.OrthographicCamera(0.25 * frustumSize * aspect / - 2 / ratio, 0.25 * frustumSize * aspect / 2 / ratio, 0.5 * frustumSize / 2 / ratio, 0.5 * frustumSize / - 2 / ratio, 0.1, 1000),
+					'scene': new THREE.Scene(),
+					'mesh': undefined,
+					'leftGroup': new THREE.Group(),
+					'rightGroup': new THREE.Group()
+				},
+				'upperRight': {
+					'camera': new THREE.OrthographicCamera(0.25 * frustumSize * aspect / - 2 / ratio, 0.25 * frustumSize * aspect / 2 / ratio, 0.5 * frustumSize / 2 / ratio, 0.5 * frustumSize / - 2 / ratio, 0.1, 1000),
+					'scene': new THREE.Scene(),
+					'mesh': undefined,
+					'leftGroup': new THREE.Group(),
+					'rightGroup': new THREE.Group()
+				},
+				'lowerLeft': {
+					'camera': new THREE.OrthographicCamera(0.25 * frustumSize * aspect / - 2 / ratio, 0.25 * frustumSize * aspect / 2 / ratio, 0.5 * frustumSize / 2 / ratio, 0.5 * frustumSize / - 2 / ratio, 0.1, 1000),
+					'scene': new THREE.Scene(),
+					'mesh': undefined,
+					'leftGroup': new THREE.Group(),
+					'rightGroup': new THREE.Group()
+				},
+				'lowerRight': {
+					'camera': new THREE.OrthographicCamera(0.25 * frustumSize * aspect / - 2 / ratio, 0.25 * frustumSize * aspect / 2 / ratio, 0.5 * frustumSize / 2 / ratio, 0.5 * frustumSize / - 2 / ratio, 0.1, 1000),
+					'scene': new THREE.Scene(),
+					'mesh': undefined,
+					'leftGroup': new THREE.Group(),
+					'rightGroup': new THREE.Group()
+				}
+			};
+			
+			for (let key in rightViews){
+			
+				rightViews[key]['camera'].position.z = 30;
+				rightViews[key]['scene'].add(ambient.clone());
+				rightViews[key]['scene'].add(directionalLight.clone());
+				rightViews[key]['scene'].add(rightViews[key]['leftGroup']);
+				rightViews[key]['scene'].add(rightViews[key]['rightGroup']);
+				
+			}
+			
+			// renderer
+
+			renderer = new THREE.WebGLRenderer({ antialias: true });
+			renderer.setPixelRatio(window.devicePixelRatio);
+			renderer.setSize(window.innerWidth, window.innerHeight);
+			container.appendChild(renderer.domElement);
+			renderer.autoClear = false;
+			effect = new OutlineEffect(renderer);
+
+			// model
+			loadModel(undefined, modelPaths[modelIndex]);
+
+			//event
+			document.addEventListener('keypress', onKeyPress);
+
+			window.addEventListener('resize', onWindowResize);
+			//鏡頭控制
+			
+			initEyeMenu();
+
+		}
+		
+		function loadModel(folderPath = 'models/mmd/', modelPath){
+			
+			function onProgress(xhr) {
+				if (xhr.lengthComputable) {
+					const percentComplete = xhr.loaded / xhr.total * 100;
+					console.log(Math.round(percentComplete, 2) + '% downloaded');
+				}
+			}
+			
+			var modelFile = folderPath + modelPath;
+
+			helper = new MMDAnimationHelper();
+
+			const loader = new MMDLoader();
+
+			loader.load(modelFile, function (object) {
+
+				scene.remove(mesh);
+
+				mesh = object;
+				mesh.position.y = - 10;
+
+				scene.add(mesh);
+				
+				for (let key in rightViews){
+					
+					rightViews[key]['scene'].remove(rightViews[key]['mesh']);
+					
+					rightViews[key]['mesh'] = SkeletonUtils.clone(object);
+					rightViews[key]['scene'].add(rightViews[key]['mesh']);
+				
+				};
+
+				let eyePosition = new THREE.Vector3();
+
+				//各相機對齊眼睛
+				for (let i in mesh.skeleton.bones){
+					if (mesh.skeleton.bones[i].name == '左目'){
+						mesh.skeleton.bones[i].getWorldPosition(eyePosition);
+						camera.position.y = eyePosition.y;
+						for (let key in rightViews)
+							rightViews[key]['camera'].position.y = eyePosition.y;
+						console.log(camera.position.y);
+						break;
+					}
+				}
+
+			}, onProgress, null);
+		}
+		
+		function initEyeMenu() {
+			
+			eyeMenu = new GUI();
+			eyeMenu.domElement.id = 'eyeMenu';
+			
+			var eyeFolder = eyeMenu.addFolder('眼睛操作');
+			var hintFolder = eyeMenu.addFolder('操作提示');
+			
+			// eyeFolder...
+			
+			function loadLines() {
+				
+				let jsonInput = document.createElement("input");
+				
+				jsonInput.type = "file";
+				jsonInput.accept = ".json";
+				jsonInput.addEventListener('change', (e) => {
+				
+					leftGroup.children = [];
+					rightGroup.children = [];
+					
+					for(let key in rightViews){
+						rightViews[key]['leftGroup'].children = [];
+						rightViews[key]['rightGroup'].children = [];
+					}
+				
+					var reader = new FileReader();
+					reader.onload = function(e) {
+					
+						console.log(JSON.parse(e.target.result));
+						lineData = JSON.parse(e.target.result);
+					
+						//邊框繪製
+						console.log(lineData);
+						for ( let key in lineData ){
+							
+							if (lineData[key]['drawn'] == false) continue;
+							
+							//points
+							let points = JSON.parse(JSON.stringify(lineData[key]['points']));
+							let copiedPoints = JSON.parse(JSON.stringify(points));
+							for(let i in copiedPoints)
+								copiedPoints[i].x *= -1;
+							
+							//color
+							let lineColor = 0x000000, copiedLineColor = 0x000000;
+							if (key == '1' || key == '3'){
+								lineColor = 0xff1a1a;
+								copiedLineColor = 0xff33ff;
+							}
+							else {
+								lineColor = 0x44ffbb;
+								copiedLineColor = 0x99ccff;
+							}
+							
+							//geometry, material
+							let geometry = new THREE.BufferGeometry().setFromPoints( points );
+							let copiedGeometry = new THREE.BufferGeometry().setFromPoints( copiedPoints );
+							let material = new THREE.LineBasicMaterial( { color: lineColor } );
+							let copiedMaterial = new THREE.LineBasicMaterial( { color: copiedLineColor } );
+
+							let line = new THREE.Line( geometry, material );
+							leftGroup.add(line);
+							for(let key in rightViews)
+								rightViews[key]['leftGroup'].add(line.clone());
+							
+							//line
+							let copiedLine = new THREE.Line( copiedGeometry, copiedMaterial );
+							rightGroup.add(copiedLine);
+							for(let key in rightViews)
+								rightViews[key]['rightGroup'].add(copiedLine.clone());
+							
+							lineData[key]['ref'] = line;
+						}
+						console.log(lineData);
+						
+						let points = [], lineColor = 0x000000, geometry, material, line;
+						let copiedPoints = [], copiedLineColor = 0x000000, copiedGeometry, copiedMaterial, copiedLine;
+						let diffY = lineData['3']['points'][0].y - lineData['1']['points'][0].y,
+							diffX = lineData['4']['points'][0].x - lineData['2']['points'][0].x;
+						
+						//橫線補充
+						lineColor = 0xff1a1a; copiedLineColor = 0xff33ff;
+						material = new THREE.LineBasicMaterial( { color: lineColor } );
+						copiedMaterial = new THREE.LineBasicMaterial( { color: copiedLineColor } );
+						points = JSON.parse(JSON.stringify(lineData['1']['points']));
+						
+						for(let i = 1; i <= 2; ++i){
+						
+							//points
+							for (let j in points)
+								points[j].y += diffY/3;
+							copiedPoints = JSON.parse(JSON.stringify(points));
+							for(let j in copiedPoints)
+								copiedPoints[j].x *= -1;
+							
+							//geometry
+							geometry = new THREE.BufferGeometry().setFromPoints( points );
+							copiedGeometry = new THREE.BufferGeometry().setFromPoints( copiedPoints );
+							
+							//line
+							line = new THREE.Line( geometry, material );
+							copiedLine = new THREE.Line( copiedGeometry, copiedMaterial );
+							leftGroup.add(line);
+							rightGroup.add(copiedLine);
+							for(let key in rightViews){
+								rightViews[key]['leftGroup'].add(line.clone());
+								rightViews[key]['rightGroup'].add(copiedLine.clone());
+							}
+							
+						}
+						
+						//直線補充
+						lineColor = 0x44ffbb; copiedLineColor = 0x99ccff;
+						material = new THREE.LineBasicMaterial( { color: lineColor } );
+						copiedMaterial = new THREE.LineBasicMaterial( { color: copiedLineColor } );
+						points = JSON.parse(JSON.stringify(lineData['2']['points']));
+						
+						for (let i = 1; i <= 7; ++i){
+							
+							//points
+							for (let j in points)
+								points[j].x += diffX/8;
+							copiedPoints = JSON.parse(JSON.stringify(points));
+							for(let j in copiedPoints)
+								copiedPoints[j].x *= -1;
+							
+							//geometry
+							geometry = new THREE.BufferGeometry().setFromPoints( points );
+							copiedGeometry = new THREE.BufferGeometry().setFromPoints( copiedPoints );
+							
+							//line
+							line = new THREE.Line( geometry, material );
+							copiedLine = new THREE.Line( copiedGeometry, copiedMaterial );
+							leftGroup.add(line);
+							rightGroup.add(copiedLine);
+							for(let key in rightViews){
+								rightViews[key]['leftGroup'].add(line.clone());
+								rightViews[key]['rightGroup'].add(copiedLine.clone());
+							}
+							
+						}
+						
+						//visible設置
+						for(let key in rightViews){
+							rightViews[key]['leftGroup'].visible = false;
+							rightViews[key]['rightGroup'].visible = false;
+						}
+						
+						rightViews[eyeState[selectedEye]['view']][eyeState[selectedEye]['side']].visible = true;
+						if (eyeState[selectedEye]['side'] == 'leftGroup'){
+							leftGroup.visible = true;
+							rightGroup.visible = false;
+						}
+						else{
+							leftGroup.visible = false;
+							rightGroup.visible = true;
+						}
+						
+					};
+					
+					console.log(e.target.files[0]);
+					reader.readAsText(e.target.files[0]);
+					
+					jsonInput.remove();
+				});
+				
+				jsonInput.click();
+				
+			};
+			
+			/*
+			function copyAngles() {
+			};
+			
+			function saveAngles() {
+			};
+			*/
+			
+			eyeParams = {
+				'讀取線條': loadLines,
+				'當前視窗': eyeState[selectedEye]['view'],
+				'當前眼睛': eyeState[selectedEye]['side'],
+				'目標方向': eyeState[selectedEye]['look'],
+				//'複製角度': copyAngles,
+				//'角度存檔': saveAngles
+			};
+			
+			eyeFolder.add(eyeParams, '讀取線條');
+			eyeFolder.add(eyeParams, '當前視窗');
+			eyeFolder.add(eyeParams, '當前眼睛');
+			eyeFolder.add(eyeParams, '目標方向');
+			//eyeFolder.add(eyeParams, '複製角度');
+			//eyeFolder.add(eyeParams, '角度存檔');
+			
+			// ...eyeFolder
+			
+			// hintFolder...
+			
+			var hintParams = {
+				'Operate1': 'A, D 切換角色',
+				'Operate2': '1, 2 切換虹膜',
+				'Operate3': 'L/RMB 控制/固定角度',
+			};
+			
+			hintFolder.add(hintParams, 'Operate1');
+			hintFolder.add(hintParams, 'Operate2');
+			hintFolder.add(hintParams, 'Operate3');
+			
+			// ...hintFolder
+			
+			eyeFolder.open();
+			hintFolder.open();
+			
+		}
+
+		function onWindowResize() {
+
+			SCREEN_WIDTH = window.innerWidth;
+			SCREEN_HEIGHT = window.innerHeight;
+			aspect = SCREEN_WIDTH / SCREEN_HEIGHT;
+
+			effect.setSize(SCREEN_WIDTH, SCREEN_HEIGHT);
+
+			camera.left = 0.5 * frustumSize * aspect / - 2;
+			camera.right = 0.5 * frustumSize * aspect / 2;
+			camera.top = frustumSize / 2;
+			camera.bottom = - frustumSize / 2;
+			camera.updateProjectionMatrix();
+
+			for (let key in rightViews){
+				rightViews[key]['camera'].left = 0.25 * frustumSize * aspect / - 2;
+				rightViews[key]['camera'].right = 0.25 * frustumSize * aspect / 2;
+				rightViews[key]['camera'].top = 0.5 * frustumSize / 2;
+				rightViews[key]['camera'].bottom = - 0.5 * frustumSize / 2;
+				rightViews[key]['camera'].updateProjectionMatrix();
+			}
+			
+		}
+
+		function onKeyPress( event ) {
+			
+			pressedKey = String.fromCharCode( event.which );
+			console.log(pressedKey + ' is pressed.');
+			let lastEye = selectedEye;
+			switch(pressedKey){
+				case 'A':
+				case 'a':
+					modelIndex -= 1;
+					if (modelIndex < 0)
+						modelIndex = modelPaths.length - 1;
+					loadModel(undefined, modelPaths[modelIndex]);
+					break;
+				case 'D':
+				case 'd':
+					modelIndex += 1;
+					if (modelIndex >= modelPaths.length)
+						modelIndex = 0;
+					loadModel(undefined, modelPaths[modelIndex]);
+					break;
+				case '1':
+					selectedEye -= 1;
+					if (selectedEye < 0)
+						selectedEye = 7;
+					eyeParams['當前視窗'] = eyeState[selectedEye]['view'];
+					eyeParams['當前眼睛'] = eyeState[selectedEye]['side'];
+					eyeParams['目標方向'] = eyeState[selectedEye]['look'];
+					rightViews[eyeState[lastEye]['view']][eyeState[lastEye]['side']].visible = false;
+					rightViews[eyeState[selectedEye]['view']][eyeState[selectedEye]['side']].visible = true;
+					eyeMenu.updateDisplay();
+					if (eyeState[selectedEye]['side'] == 'leftGroup'){
+						leftGroup.visible = true;
+						rightGroup.visible = false;
+					}
+					else{
+						leftGroup.visible = false;
+						rightGroup.visible = true;
+					}
+					break;
+				case '2':
+					selectedEye += 1;
+					if (selectedEye > 7)
+						selectedEye = 0;
+					eyeParams['當前視窗'] = eyeState[selectedEye]['view'];
+					eyeParams['當前眼睛'] = eyeState[selectedEye]['side'];
+					eyeParams['目標方向'] = eyeState[selectedEye]['look'];
+					rightViews[eyeState[lastEye]['view']][eyeState[lastEye]['side']].visible = false;
+					rightViews[eyeState[selectedEye]['view']][eyeState[selectedEye]['side']].visible = true;
+					eyeMenu.updateDisplay();
+					if (eyeState[selectedEye]['side'] == 'leftGroup'){
+						leftGroup.visible = true;
+						rightGroup.visible = false;
+					}
+					else{
+						leftGroup.visible = false;
+						rightGroup.visible = true;
+					}
+					break;
+			}
+		
+		}
+
+		function animate() {
+
+			requestAnimationFrame(animate);
+			render();
+
+		}
+
+		function render() {
+
+			effect.clear();
+
+			effect.setViewport(0, 0, SCREEN_WIDTH / 2, SCREEN_HEIGHT);
+			effect.render(scene, camera);
+
+			effect.setViewport(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2);
+			effect.render(rightViews['upperLeft']['scene'], rightViews['upperLeft']['camera']);
+
+			effect.setViewport(SCREEN_WIDTH / 2 + SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2);
+			effect.render(rightViews['upperRight']['scene'], rightViews['upperRight']['camera']);
+
+			effect.setViewport(SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2);
+			effect.render(rightViews['lowerLeft']['scene'], rightViews['lowerLeft']['camera']);
+
+			effect.setViewport(SCREEN_WIDTH / 2 + SCREEN_WIDTH / 4, 0, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2);
+			effect.render(rightViews['lowerRight']['scene'], rightViews['lowerRight']['camera']);
+			
+		}
+	</script>
+
+</body>
+
+</html>
